@@ -66,6 +66,22 @@ public abstract class User {
         return id;
     }
 
+    // ----- Added: getters and a protected role setter (needed by Admin) -----
+    public String getUserId() { return userId; }
+    public String getUserName() { return userName; }
+    public String getUserPassword() { return userPassword; }
+    public String getUserRegisterTime() { return userRegisterTime; }
+    public String getUserRole() { return userRole; }
+    public void setUserName(String userName) { this.userName = userName; }
+    public void setUserPassword(String userPassword) { this.userPassword = userPassword; }
+
+    protected void setUserRole(String userRole) {
+        if (!"customer".equals(userRole) && !"admin".equals(userRole)) {
+            throw new IllegalArgumentException("Role must be \"customer\" or \"admin\": " + userRole);
+        }
+        this.userRole = userRole;
+    }
+
     /**
      * Returns the user information as a formatted string.
      * @return String in JSON-like format
