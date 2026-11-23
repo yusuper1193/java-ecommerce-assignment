@@ -1,1 +1,1 @@
-Khang gay lọ
+source path: data/items.csv
