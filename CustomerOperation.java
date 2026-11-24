@@ -2,7 +2,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -12,17 +11,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Contains all the operations related to the customer.
- * This class follows the Singleton pattern.
+ * This class follows the Singleton pattern and reuses UserOperation
+ * (also a Singleton) for validation, ID generation and password encryption.
  */
 public class CustomerOperation {
 
-    private static final Path USER_FILE = Paths.get("data", "users.txt");
+    // One shared data file for both operation classes.
+    private static final Path USER_FILE = UserOperation.USER_FILE;
     private static final int PAGE_SIZE = 10;
     private static final DateTimeFormatter TIME_FORMAT =
             DateTimeFormatter.ofPattern("dd-MM-yyyy_HH:mm:ss");
@@ -32,11 +32,13 @@ public class CustomerOperation {
             Pattern.compile("^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\\.)+[A-Za-z]{2,}$");
     // exactly 10 digits, starting with 04 or 03
     private static final Pattern MOBILE_PATTERN = Pattern.compile("^0[34]\\d{8}$");
-    // "key":"value" pairs inside one line of users.txt
+    // "key":"value" pairs inside one line of the user file
     private static final Pattern FIELD_PATTERN =
             Pattern.compile("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"");
 
     private static CustomerOperation instance;
+
+    private final UserOperation userOp = UserOperation.getInstance();
 
     // User only allows one object per ID, so loaded customers are kept here and reused.
     private final Map<String, Customer> cache = new HashMap<>();
@@ -78,40 +80,39 @@ public class CustomerOperation {
     }
 
     /**
-     * Save the information of the new customer into the data/users.txt file.
+     * Save the information of the new customer into the user data file.
+     * The password is encrypted before it is stored.
      * @param userName     Customer's username
-     * @param userPassword Customer's password
+     * @param userPassword Customer's password (plain text)
      * @param userEmail    Customer's email
      * @param userMobile   Customer's mobile number
      * @return true if success, false if failure
      */
     public boolean registerCustomer(String userName, String userPassword,
                                     String userEmail, String userMobile) {
-        if (!isValidText(userName) || !isValidText(userPassword)
-                || !validateEmail(userEmail) || !validateMobile(userMobile)) {
+        if (!userOp.validateUsername(userName)
+                || !userOp.validatePassword(userPassword)
+                || !validateEmail(userEmail)
+                || !validateMobile(userMobile)) {
             return false;
         }
+        if (userOp.checkUsernameExist(userName)) {
+            return false; // username already exists
+        }
+
         try {
             List<String> lines = readLines();
-            Set<String> fileIds = new HashSet<>();
-            for (String line : lines) {
-                Map<String, String> r = parseRecord(line);
-                if (r == null) continue;
-                if (userName.equals(r.get("user_name"))) {
-                    return false; // username already exists
-                }
-                fileIds.add(r.get("user_id"));
-            }
 
+            String encryptedPassword = userOp.encryptPassword(userPassword);
             String time = LocalDateTime.now().format(TIME_FORMAT);
+
             Customer customer = null;
             while (customer == null) {
-                String id = String.format("u_%010d",
-                        ThreadLocalRandom.current().nextLong(1_000_000_000L, 10_000_000_000L));
-                if (fileIds.contains(id) || seenIds.contains(id)) continue;
+                String id = userOp.generateUniqueUserId(); // unique within the file
+                if (seenIds.contains(id)) continue;        // also skip deleted/cached IDs
                 seenIds.add(id);
                 try {
-                    customer = new Customer(id, userName, userPassword, time,
+                    customer = new Customer(id, userName, encryptedPassword, time,
                             "customer", userEmail, userMobile);
                 } catch (IllegalArgumentException e) {
                     // ID already used by another object: try a different one
@@ -131,6 +132,7 @@ public class CustomerOperation {
      * Update the given customer object's attribute value. According to
      * different attributes, perform appropriate validations.
      * Supported attributes: user_name, user_password, user_email, user_mobile.
+     * A new password is encrypted before it is stored.
      * @param attributeName  The attribute to update
      * @param value          The new value
      * @param customerObject The customer object to update
@@ -143,11 +145,12 @@ public class CustomerOperation {
         String field;
         switch (attributeName.replace("_", "").toLowerCase()) {
             case "username":
-                if (!isValidText(value)) return false;
+                if (!userOp.validateUsername(value)) return false;
                 field = "user_name";
                 break;
             case "userpassword":
-                if (!isValidText(value)) return false;
+                if (!userOp.validatePassword(value)) return false;
+                value = userOp.encryptPassword(value);
                 field = "user_password";
                 break;
             case "useremail":
@@ -193,7 +196,7 @@ public class CustomerOperation {
     }
 
     /**
-     * Delete the customer from the data/users.txt file based on the
+     * Delete the customer from the user data file based on the
      * provided customer_id.
      * @param customerId The ID of the customer to delete
      * @return true if deleted, false if failed
@@ -223,7 +226,7 @@ public class CustomerOperation {
     }
 
     /**
-     * Retrieve one page of customers from the data/users.txt.
+     * Retrieve one page of customers from the user data file.
      * One page contains a maximum of 10 customers.
      * @param pageNumber The page number to retrieve (starting from 1)
      * @return A list of Customer objects, the current page number, and total pages
@@ -255,7 +258,7 @@ public class CustomerOperation {
     }
 
     /**
-     * Removes all the customers from the data/users.txt file.
+     * Removes all the customers from the user data file.
      * Admin records in the file are kept.
      */
     public void deleteAllCustomers() {
@@ -276,13 +279,30 @@ public class CustomerOperation {
         }
     }
 
-    // ---------------------------------------------------------------- helpers
-
-    /** Non-empty text that cannot break the one-line JSON-like record. */
-    private boolean isValidText(String s) {
-        return s != null && !s.trim().isEmpty()
-                && s.indexOf('"') < 0 && s.indexOf('\n') < 0 && s.indexOf('\r') < 0;
+    /**
+     * Returns the Customer with the given ID, reusing the cached object if one
+     * exists (so the same ID never gets two Customer objects).
+     * Used by UserOperation.login().
+     * @param customerId The customer's ID
+     * @return The Customer, or null if not found
+     */
+    public Customer getCustomerById(String customerId) {
+        if (customerId == null) return null;
+        try {
+            for (String line : readLines()) {
+                Map<String, String> r = parseRecord(line);
+                if (r != null && customerId.equals(r.get("user_id"))
+                        && "customer".equals(r.get("user_role"))) {
+                    return toCustomer(r);
+                }
+            }
+        } catch (IOException e) {
+            // treat an unreadable file as customer not found
+        }
+        return null;
     }
+
+    // ---------------------------------------------------------------- helpers
 
     private List<String> readLines() throws IOException {
         if (!Files.exists(USER_FILE)) {
@@ -296,7 +316,7 @@ public class CustomerOperation {
         Files.write(USER_FILE, lines, StandardCharsets.UTF_8);
     }
 
-    /** Turns one line of users.txt into a key/value map, or null if it is not a user record. */
+    /** Turns one line of the user file into a key/value map, or null if it is not a user record. */
     private Map<String, String> parseRecord(String line) {
         Matcher m = FIELD_PATTERN.matcher(line);
         Map<String, String> record = new HashMap<>();
