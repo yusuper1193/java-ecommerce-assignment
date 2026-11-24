@@ -5,8 +5,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -16,10 +18,14 @@ public class UserOperation {
     // ---------- Singleton ----------
     private static volatile UserOperation instance;
 
-    private static final Path USER_FILE = Paths.get("data-sample", "users.csv");
+    // Package-private so CustomerOperation uses the exact same file.
+    static final Path USER_FILE = Paths.get("data-sample", "users.csv");
     private static final String CHARSET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private final SecureRandom random = new SecureRandom();
+
+    // Admin only allows one object per ID, so logged-in admins are kept here and reused.
+    private final Map<String, Admin> adminCache = new HashMap<>();
 
     /** Private constructor: prevents instantiation from outside. */
     private UserOperation() {
@@ -195,21 +201,36 @@ public class UserOperation {
             }
 
             String id = extractField(line, "user_id");
-            String registerTime = extractField(line, "user_register_time");
             String role = extractField(line, "user_role");
 
             if ("admin".equalsIgnoreCase(role)) {
-                return new Admin(id, name, storedPassword, registerTime, role);
-            } else {
-                String email = extractField(line, "user_email");
-                String mobile = extractField(line, "user_mobile");
-                return new Customer(id, name, storedPassword, registerTime, role, email, mobile);
+                return getAdmin(id, name, storedPassword,
+                        extractField(line, "user_register_time"), role);
+            } else if ("customer".equalsIgnoreCase(role)) {
+                // CustomerOperation owns all Customer objects, so reuse its instance
+                return CustomerOperation.getInstance().getCustomerById(id);
             }
+            return null;
         }
         return null;
     }
 
     // ---------- Private helpers ----------
+
+    /** Returns the cached Admin for this ID, creating it only the first time. */
+    private Admin getAdmin(String id, String name, String password,
+                           String registerTime, String role) {
+        Admin admin = adminCache.get(id);
+        if (admin == null) {
+            try {
+                admin = new Admin(id, name, password, registerTime, role);
+            } catch (IllegalArgumentException e) {
+                return null; // ID already used by an object we don't hold
+            }
+            adminCache.put(id, admin);
+        }
+        return admin;
+    }
 
     /** Reads all non-empty lines from the user data file (empty list if missing). */
     private List<String> readUserLines() {
